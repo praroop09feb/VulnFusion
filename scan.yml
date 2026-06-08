@@ -1,0 +1,85 @@
+name: VulnFusion Security Scan
+
+on:
+  repository_dispatch:
+    types: [run-scan]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Cache Nuclei Templates
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/nuclei-templates
+          key: ${{ runner.os }}-nuclei-templates-v1
+          restore-keys: |
+            ${{ runner.os }}-nuclei-templates-
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-xsstrike-v1
+
+      - name: Install OS Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends perl python3 python3-pip unzip wget libxml-writer-perl libnet-ssleay-perl
+
+      - name: Install Security Tools
+        run: |
+          mkdir -p bin
+
+          echo "==> Downloading Nuclei..."
+          wget -q https://github.com/projectdiscovery/nuclei/releases/download/v3.3.10/nuclei_3.3.10_linux_amd64.zip -O nuclei.zip
+          unzip -o nuclei.zip nuclei -d bin/ && chmod +x bin/nuclei && rm -f nuclei.zip
+
+          echo "==> Downloading Subfinder..."
+          wget -q https://github.com/projectdiscovery/subfinder/releases/download/v2.6.7/subfinder_2.6.7_linux_amd64.zip -O subfinder.zip
+          unzip -o subfinder.zip subfinder -d bin/ && chmod +x bin/subfinder && rm -f subfinder.zip
+
+          echo "==> Installing tools in parallel..."
+          rm -rf bin/sqlmap bin/nikto-dir bin/xsstrike
+          git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git bin/sqlmap &
+          git clone --depth 1 https://github.com/sullo/nikto.git bin/nikto-dir &
+          git clone --depth 1 https://github.com/s0md3v/XSStrike.git bin/xsstrike &
+          wait
+          echo "==> All tools installed."
+          ls -la bin/
+
+      - name: Update Nuclei Templates
+        run: ./bin/nuclei -ut -silent || true
+
+      - name: Install Node Dependencies
+        run: npm ci
+
+      - name: Install Python Dependencies
+        run: pip3 install requests fuzzywuzzy python-Levenshtein --quiet
+
+      - name: Add tools to PATH
+        run: echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
+
+      - name: Run Scan Worker
+        env:
+          SCAN_URL: ${{ github.event.client_payload.url }}
+          SCAN_ID: ${{ github.event.client_payload.scan_id }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CI: 'true'
+          GITHUB_ACTIONS: 'true'
+        run: node scanner-worker.js
